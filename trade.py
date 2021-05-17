@@ -1,81 +1,113 @@
 import sys
-import ccxt
+import ccxt.async_support as ccxt
 import os
-from itertools import repeat
+import asyncio
+import logging
+import builtins
 from pprint import pprint
-from multiprocessing.pool import ThreadPool
+from datetime import datetime
 
 # replace with your key / secret
-key =  os.environ.get('ftx_key')
-secret =  os.environ.get('ftx_secret')
+key = os.environ.get('ftx_key')
+secret = os.environ.get('ftx_secret')
 
+
+current_symbol = "BTC-PERP"
 exchange = ccxt.ftx({
     'apiKey': key,
-    'secret': secret
+    'secret': secret,
+    'enableRateLimit': True,
+    #'rateLimit': 250 # Could be required for functions like scaled_order.
 })
-exchange.load_markets()
+    
 
+def tprint(msg):
+    print(str(datetime.utcnow()) + " - " + str(msg))
 
-# cancel all open orders for symbol
-def cancel_all(symbol):
-    res = exchange.cancel_all_orders(symbol)
-    pprint(res)
+async def help(function_str=None):
+    builtins.help(globals()[function_str])
 
+async def cancel_all():
+    """
+        This function cancels all active orders on the current trading symbol.
+        
+        Usage on CLI:
+            "cancel_all"
+    """
+    res = await exchange.cancel_all_orders(current_symbol)
+    tprint(res)
 
-# create and execute a scaled order
-def scaled_order(symbol, side, total, start_price, end_price, num_orders, multithreading=False):
-    # cast command line args to proper types for math
+async def scaled_order(side, total, start_price, end_price, num_orders):
+    """
+        This function places a number of `num_orders` uniformly distributed limit orders of the given `side` between `start_price` and `end_price`, such that the total amount ordere is `total` (base asset), on the current trading symbol.
+        
+        Usage on CLI:
+            "scaled_order sell 0.1 42069 69420 10"
+    """
     total = float(total)
     start_price = float(start_price)
     end_price = float(end_price)
     num_orders = int(num_orders)
-
-    # params for the order
-    params = {'postOnly': True}
-
-    # size of each order
     order_amount = total / num_orders
-
-    # step size of each order price starting from start_price
     step_size = (end_price-start_price)/(num_orders-1)
-    
-    if str(multithreading).lower() == "true": #the user wants to use multithreading
-        # loop to generate orders prices
-        order_prices = [start_price + step_size*order_num for order_num in range(num_orders)] # the price of each order, using step_size to calculate offset
-        # send the orders
-        with ThreadPool() as pool:
-            pool.starmap(simple_order, zip(repeat(symbol), repeat(side), repeat(order_amount), order_prices))
-    else:
-        # loop to generate orders
-        for order_num in range(num_orders):
-            # the price of this order, using step_size to calculate offset
-            order_price = start_price + step_size*order_num
-            # send the order
-            res = exchange.create_order(symbol, "limit", side, order_amount, order_price, params)
-            pprint(res)
-
-
-
-# create and execute a basic order
-def simple_order(symbol, side, amount, price):
-    # params for the order
     params = {'postOnly': True}
-    # send the order
-    res = exchange.create_order(symbol, "limit", side, amount, price, params)
-    pprint(res)
 
+    orders = []
+    for order_num in range(num_orders):
+        order_price = start_price + step_size * order_num
+        orders.append(asyncio.create_task(limit_order(side, order_amount, order_price)))
+    await asyncio.wait(orders)
 
-# parse function name and args and call function
-def main():
-    # name of function
-    func_name = sys.argv[1]
-    # args passed to function
-    args = sys.argv[2:]
-    # calling the function
-    globals()[func_name](*args)
+async def limit_order(side, amount, price, post_only=True):
+    """
+        This function places a postOnly limit order of the given `amount`, with the given `side`, at the given `price`, on the current trading symbol.
+        Set the post_only parameter to False to send regular limit orders.
+        
+        Usage on CLI:
+            "limit_order buy 0.1 42069"
+            "limit_order sell 0.1 44444 False" (this order could be executed as a market order)
+    """
+    try:
+        params = {'postOnly': False if str(post_only).lower() == "false" else True}
+        order = await exchange.create_order(current_symbol, "limit", side, amount, price, params)
+        tprint(f"[{order['symbol']}] {order['side'].upper()} {order['amount']} @ {order['price']}")
+    except Exception as e:
+        tprint(f"Error while placing the following order [{symbol} {side} {amount} @ {price}] - " + str(e)) 
 
+async def symbol(new_symbol):
+    """
+        This function changes your trading symbol.
+        
+        Usage on CLI:
+            "symbol BTC-PERP"
+    """
+    global current_symbol
+    current_symbol = new_symbol
+    tprint(f"Now trading on {current_symbol}")
 
+async def main():
+    await exchange.load_markets()
+
+    tprint("Enter 'q' to quit.")
+    await symbol(input("> Symbol: "))
+    
+    while True:
+        command = input(f"{current_symbol}> ")
+        if command.lower() == 'q': break
+        
+        arguments = command.split(' ')
+        func_name = arguments[0]
+        args = arguments[1:]
+        
+        try:
+            await globals()[func_name](*args)
+        except KeyError as e:
+            tprint(f"Error: function {e} does not exist.")
+        except Exception as e:
+            tprint(f"Unknown error: {e}")
+            
+    await exchange.close()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.get_event_loop().run_until_complete(main())
