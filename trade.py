@@ -17,7 +17,7 @@ exchange = ccxt.ftx({
     'apiKey': key,
     'secret': secret,
     'enableRateLimit': True,
-    #'rateLimit': 250 # Could be required for functions like scaled_order.
+    'rateLimit': 250 # Could be required for functions like scaled_order.
 })
     
 
@@ -25,7 +25,10 @@ def tprint(msg):
     print(str(datetime.utcnow()) + " - " + str(msg))
 
 async def help(function_str=None):
-    builtins.help(globals()[function_str])
+    if not function_str:
+        builtins.help(globals()[function_str])
+    else:
+        tprint("You need to specify the function you need information on (example: help cancel_all)!")
 
 async def cancel_all():
     """
