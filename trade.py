@@ -1,8 +1,9 @@
 import sys
-import ccxt
+import ccxt.async_support as ccxt
 import os
 from pprint import pprint
 import time
+import asyncio
 
 # replace with your key / secret
 key =  os.environ.get('ftx_key')
@@ -10,19 +11,21 @@ secret =  os.environ.get('ftx_secret')
 
 exchange = ccxt.ftx({
     'apiKey': key,
-    'secret': secret
+    'secret': secret,
+    'enableRateLimit': True,
+    'rateLimit': 250
 })
-exchange.load_markets()
 
 
 # cancel all open orders for symbol
-def cancel_all(symbol):
-    res = exchange.cancel_all_orders(symbol)
+async def cancel_all(symbol):
+    res = await exchange.cancel_all_orders(symbol)
+    await exchange.close()
     pprint(res)
 
 
 # create and execute a scaled order
-def scaled_order(symbol, side, total, start_price, end_price, num_orders):
+async def scaled_order(symbol, side, total, start_price, end_price, num_orders):
     # cast command line args to proper types for math
     total = float(total)
     start_price = float(start_price)
@@ -37,35 +40,42 @@ def scaled_order(symbol, side, total, start_price, end_price, num_orders):
 
     # step size of each order price starting from start_price
     step_size = (end_price-start_price)/(num_orders-1)
-
+    
+    orders = []
     # loop to generate orders
     for order_num in range(num_orders):
         # the price of this order, using step_size to calculate offset
         order_price = start_price + step_size*order_num
         # send the order
-        res = exchange.create_order(symbol, "limit", side, order_amount, order_price, params)
-        pprint(res)
+        orders.append(asyncio.create_task(exchange.create_order(symbol, "limit", side, order_amount, order_price, params)))
+        #pprint(res)
+    results, _ = await asyncio.wait(orders)
+    pprint([result.result() for result in results])
+    await exchange.close()
 
 
 # create and execute a basic order
-def simple_order(symbol, side, amount, price):
+async def simple_order(symbol, side, amount, price):
     # params for the order
     params = {'postOnly': True}
     # send the order
-    res = exchange.create_order(symbol, "limit", side, amount, price, params)
+    res = await exchange.create_order(symbol, "limit", side, amount, price, params)
+    await exchange.close()
     pprint(res)
 
 
 # get the top bid and ask as [bid, ask]
-def get_top_of_book(symbol):
-    res = exchange.fetch_order_book (symbol)
+async def get_top_of_book(symbol):
+    res = await exchange.fetch_order_book (symbol)
     top_bid = res["bids"][0][0]
     top_ask = res["asks"][0][0]
+    await exchange.close()
     return [top_bid, top_ask]
 
 
 # create an order that chases the top price by offset
-def limit_chaser(symbol, side, amount, offset=200):
+async def limit_chaser(symbol, side, amount, offset=200):
+    offset = float(offset) #if the offset is input by the user, we must convert it from str to float
     side = side.lower()
 
     # params for the order
@@ -81,55 +91,59 @@ def limit_chaser(symbol, side, amount, offset=200):
     try:
         while(True):
             # get the top of the book
-            top_of_book = get_top_of_book(symbol)
+            top_of_book = await get_top_of_book(symbol)
             if (side == "sell"):
                 # set the order price adjusted for offset
                 price = top_of_book[0] + offset
                 # if we dont have an order yet place one
                 if (not last_order):
-                    last_order = exchange.create_order(symbol, "limit", side, remaining, price, params)
+                    last_order = await exchange.create_order(symbol, "limit", side, remaining, price, params)
                 # get last order again in case it has closed
                 else:
-                    last_order = exchange.fetch_order(last_order["id"])
+                    last_order = await exchange.fetch_order(last_order["id"])
                 # if closed, done. return
                 if last_order["status"] == "closed":
+                    await exchange.close()
                     return
                 # if the top bid adjusted for offset is above price, we need to update order
                 if top_of_book[0] + offset  < last_order["price"]:
                     print("resubmitting order")
                     # cancel the order
-                    exchange.cancel_order(last_order["id"])
+                    await exchange.cancel_order(last_order["id"])
                     # refetch to update remaining incase of partial fills between last fetch and now
-                    last_order = exchange.fetch_order(last_order["id"])
+                    last_order = await exchange.fetch_order(last_order["id"])
                     remaining = last_order["remaining"]
                     # create new order
-                    last_order = exchange.create_order(symbol, "limit", side, remaining, price, params)
+                    last_order = await exchange.create_order(symbol, "limit", side, remaining, price, params)
 
             # logic same as above but inverted
             elif (side == "buy"):
                 price = top_of_book[1] - offset
                 if (not last_order):
-                    last_order = exchange.create_order(symbol, "limit", side, remaining, price, params)
+                    last_order = await exchange.create_order(symbol, "limit", side, remaining, price, params)
                 else:
-                    last_order = exchange.fetch_order(last_order["id"])
+                    last_order = await exchange.fetch_order(last_order["id"])
                 if last_order["status"] == "closed":
+                    await exchange.close()
                     return
                 if top_of_book[1] - offset  > last_order["price"]:
                     print("resubmitting order")
-                    exchange.cancel_order(last_order["id"])
-                    last_order = exchange.fetch_order(last_order["id"])
+                    await exchange.cancel_order(last_order["id"])
+                    last_order = await exchange.fetch_order(last_order["id"])
                     remaining = last_order["remaining"]
-                    last_order = exchange.create_order(symbol, "limit", side, remaining, price, params)
+                    last_order = await exchange.create_order(symbol, "limit", side, remaining, price, params)
         time.sleep(2)
     #
     except KeyboardInterrupt as e:
         if (last_order):
-            exchange.cancel_order(last_order["id"])
+            await exchange.cancel_order(last_order["id"])
         raise e
     except Exception as e:
         if (last_order):
-            exchange.cancel_order(last_order["id"])
+            await exchange.cancel_order(last_order["id"])
         raise e
+    
+    
 
 
 
@@ -140,7 +154,7 @@ def main():
     # args passed to function
     args = sys.argv[2:]
     # calling the function
-    globals()[func_name](*args)
+    asyncio.get_event_loop().run_until_complete(globals()[func_name](*args))
 
 
 
